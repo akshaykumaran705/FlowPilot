@@ -15,6 +15,10 @@ import {
   getDayPlan,
   getGithubTasks,
   getLocalTasks,
+  listNotifications,
+  pollSlackNotifications,
+  scheduleNotificationNow,
+  scheduleNotificationLater,
   planDay,
   updateSettings,
 } from '@/lib/api';
@@ -42,6 +46,13 @@ export default function Dashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [todayPlan, setTodayPlan] = useState<DayPlan | null>(null);
   const [focusBlocks, setFocusBlocks] = useState<FocusBlock[]>([]);
+  const [slackNotifications, setSlackNotifications] = useState<
+    { id: string; text: string; recommendation?: string }[]
+  >([]);
+
+  const cleanSlackText = (text: string): string => {
+    return text.replace(/<@[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  };
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -68,21 +79,42 @@ export default function Dashboard() {
 
       const allBackendTasks = [...githubTasks, ...localTasks];
 
-      const mappedTasks: Task[] = allBackendTasks.map((t) => ({
-        id: t.id,
-        user_id: user.id,
-        project_id: null,
-        external_id: null,
-        source: t.source === 'GITHUB' ? 'github' : 'manual',
-        title: t.title,
-        description: t.description ?? null,
-        url: t.url ?? null,
-        labels: t.labels ?? null,
-        estimated_complexity: 'medium',
-        status: 'open',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }));
+      const uniqueBackendTasksMap = new Map<string, (typeof allBackendTasks)[number]>();
+      allBackendTasks.forEach((t) => {
+        const key = `${t.source}|${t.title}|${t.description ?? ''}`;
+        if (!uniqueBackendTasksMap.has(key)) {
+          uniqueBackendTasksMap.set(key, t);
+        }
+      });
+      const uniqueBackendTasks = Array.from(uniqueBackendTasksMap.values());
+
+      const mappedTasks: Task[] = uniqueBackendTasks.map((t) => {
+        const isSlackTask =
+          t.labels?.includes('slack') ?? false;
+
+        const cleanedTitle =
+          isSlackTask && t.title ? cleanSlackText(t.title) : t.title;
+        const cleanedDescription =
+          isSlackTask && t.description
+            ? cleanSlackText(t.description)
+            : t.description ?? null;
+
+        return {
+          id: t.id,
+          user_id: user.id,
+          project_id: null,
+          external_id: null,
+          source: t.source === 'GITHUB' ? 'github' : 'manual',
+          title: cleanedTitle,
+          description: cleanedDescription,
+          url: t.url ?? null,
+          labels: t.labels ?? null,
+          estimated_complexity: 'medium',
+          status: 'open',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+      });
 
       setTasks(mappedTasks);
 
@@ -122,6 +154,36 @@ export default function Dashboard() {
         // 404 or other error: treat as no plan for today
         setTodayPlan(null);
         setFocusBlocks([]);
+      }
+
+      try {
+        await pollSlackNotifications();
+        const notifications = await listNotifications(false);
+        const slack = notifications.filter(
+          (n) => n.source === 'SLACK' && !n.processed,
+        );
+
+        if (slack.length > 0) {
+          const mapped = slack.map((n) => {
+            const recommendation = n.interruptDecision
+              ? `${n.interruptDecision.priority} · ${n.interruptDecision.suggestedAction}`
+              : 'New work detected';
+
+            return {
+              id: n.id,
+              text: cleanSlackText(n.rawText),
+              recommendation,
+            };
+          });
+
+          setSlackNotifications(mapped);
+        } else {
+          setSlackNotifications([]);
+        }
+      } catch (err) {
+        // If Slack polling fails, continue without blocking the dashboard.
+        // eslint-disable-next-line no-console
+        console.error('Failed to poll Slack notifications:', err);
       }
     } catch (error: any) {
       toast({
@@ -196,6 +258,50 @@ export default function Dashboard() {
     }
   };
 
+  const handleScheduleSlackNow = async (notificationId: string) => {
+    try {
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      await scheduleNotificationNow(notificationId);
+      await planDay(todayStr);
+      await loadData();
+      setSlackNotifications((prev) =>
+        prev.filter((n) => n.id !== notificationId),
+      );
+
+      toast({
+        title: 'Slack task scheduled',
+        description: 'It has been added to today’s plan.',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Error scheduling Slack task',
+        description: error.message,
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleScheduleSlackLater = async (notificationId: string) => {
+    try {
+      await scheduleNotificationLater(notificationId);
+      setSlackNotifications((prev) =>
+        prev.filter((n) => n.id !== notificationId),
+      );
+
+      toast({
+        title: 'Slack task saved for later',
+        description:
+          'It will be considered in your next day’s planning based on its due date.',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Error scheduling Slack task',
+        description: error.message,
+        variant: 'destructive',
+      });
+    }
+  };
+
   const handleStartSession = async (taskId: string) => {
     if (!user) return;
 
@@ -261,6 +367,41 @@ export default function Dashboard() {
               </Button>
             </div>
           </div>
+
+          {slackNotifications.length > 0 && (
+            <div className="mb-6 glass-card rounded-xl p-4 border border-border/50">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-sm font-semibold">New Slack work</h2>
+              </div>
+              <p className="text-sm mb-2 whitespace-pre-wrap">
+                {slackNotifications[0].text}
+              </p>
+              {slackNotifications[0].recommendation && (
+                <p className="text-xs text-muted-foreground mb-3">
+                  Suggestion: {slackNotifications[0].recommendation}
+                </p>
+              )}
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    handleScheduleSlackNow(slackNotifications[0].id)
+                  }
+                >
+                  Add Now
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    handleScheduleSlackLater(slackNotifications[0].id)
+                  }
+                >
+                  Schedule Later
+                </Button>
+              </div>
+            </div>
+          )}
 
           <div className="grid lg:grid-cols-3 gap-8">
             {/* Timeline Section */}

@@ -41,14 +41,16 @@ const loadLocalTasks = async (): Promise<Task[]> => {
     if (Array.isArray(raw)) {
       raw.forEach((item, index) => {
         if (!item) return;
-        const id = item.id ?? String(index);
+        const anyItem: any = item; // eslint-disable-line @typescript-eslint/no-explicit-any
+        const id = anyItem.id ?? String(index);
         tasks.push({
           id,
-          title: item.title ?? 'Untitled task',
-          description: item.description,
-          url: item.url,
+          title: anyItem.title ?? 'Untitled task',
+          description: anyItem.description,
+          url: anyItem.url,
           source: 'LOCAL',
-          labels: item.labels,
+          labels: anyItem.labels,
+          dueDate: anyItem.dueDate,
         });
       });
     } else if (typeof raw === 'object') {
@@ -62,6 +64,7 @@ const loadLocalTasks = async (): Promise<Task[]> => {
           url: anyItem.url,
           source: 'LOCAL',
           labels: anyItem.labels,
+          dueDate: anyItem.dueDate,
         });
       });
     }

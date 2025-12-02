@@ -34,6 +34,7 @@ const mapRawLocalTasks = (raw: unknown): Task[] => {
         url: anyItem.url,
         source: 'LOCAL',
         labels: anyItem.labels,
+        dueDate: anyItem.dueDate,
       });
     });
   } else if (typeof raw === 'object') {
@@ -47,6 +48,7 @@ const mapRawLocalTasks = (raw: unknown): Task[] => {
         url: anyItem.url,
         source: 'LOCAL',
         labels: anyItem.labels,
+        dueDate: anyItem.dueDate,
       });
     });
   }
@@ -123,6 +125,9 @@ router.post('/tasks/local', async (req, res) => {
     }
     if (task.labels !== undefined) {
       taskForDb.labels = task.labels;
+    }
+    if ((task as any).dueDate !== undefined) {
+      taskForDb.dueDate = (task as any).dueDate;
     }
 
     await db.ref(`${LOCAL_TASKS_PATH}/${id}`).set(taskForDb);

@@ -173,6 +173,9 @@ Guidelines:
 - Use three types of blocks: "DEEP_WORK", "SHALLOW", and "MEETING".
 - Meetings are fixed and must match the given events of type "MEETING".
 - Avoid overlapping blocks.
+- Tasks may include a "dueDate" (YYYY-MM-DD). Treat tasks with earlier due dates as higher priority, and try to allocate enough deep work time on or before their due date.
+- Tasks whose labels include "slack" represent work requested via Slack and should usually be scheduled in their own dedicated blocks (for example, labeled "Slack: ..."), not mixed into the same blocks as Jira or GitHub issue work.
+- Some tasks (both Jira and Slack-derived) may have labels like "JIRA_KEY:ABC-123". When a Slack task and a Jira task share the same "JIRA_KEY:..." label, you may group them into the same block because they refer to the same underlying issue. Otherwise, keep Slack tasks separate from Jira tasks.
 - Group related tasks into deep work blocks when possible.
 - Leave reasonable short breaks between long deep work blocks.
  - When using calendar events (MEETING/BLOCKED/INFO), use the event's title as the label and, when helpful, include a concise description in the block's "notes" field.
@@ -182,7 +185,7 @@ The user context is:
 - Timezone: ${input.timezone}
 - Working hours: ${input.workStart} - ${input.workEnd}
 
-Tasks (JSON):
+Tasks (JSON). Each task has: "id", "title", optional "description", optional "url", "source" ("GITHUB" | "JIRA" | "LOCAL"), optional "labels", and optional "dueDate" (YYYY-MM-DD). Use "dueDate" to prioritize what to schedule during this day, focusing first on tasks whose due dates are soonest and especially those due today or already overdue. Tasks with a "slack" label should be treated as Slack tasks; tasks with labels like "JIRA_KEY:ABC-123" indicate the corresponding Jira issue key. Only group Slack and Jira tasks when they share the same "JIRA_KEY:..." label; otherwise, schedule Slack tasks as separate from Jira work.
 ${JSON.stringify(input.tasks, null, 2)}
 
 Calendar / context events (JSON, including optional descriptions):

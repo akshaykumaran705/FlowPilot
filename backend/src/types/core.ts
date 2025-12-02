@@ -7,6 +7,7 @@ export interface Task {
   url?: string;
   source: TaskSource;
   labels?: string[];
+  dueDate?: string;
 }
 
 export type PlanBlockMode = 'DEEP_WORK' | 'SHALLOW' | 'MEETING';
@@ -83,4 +84,3 @@ export interface Notification {
   processed: boolean;
   interruptDecision?: NotificationInterruptDecision;
 }
-

@@ -6,6 +6,7 @@ import {
   SessionEvent,
   SessionEventType,
   Task,
+  Notification,
 } from '../types/core';
 import {
   getAssignedIssues as getGithubAssignedIssues,
@@ -27,6 +28,7 @@ const DEMO_USER_ID = 'demoUser';
 const SESSIONS_PATH = `sessions/${DEMO_USER_ID}`;
 const EVENTS_PATH = 'events';
 const LOCAL_TASKS_PATH = `tasks/${DEMO_USER_ID}/local`;
+const NOTIFICATIONS_PATH = `notifications/${DEMO_USER_ID}`;
 
 type SessionTaskSource = 'GITHUB' | 'JIRA' | 'LOCAL';
 
@@ -87,6 +89,32 @@ const loadLocalTaskById = async (taskId: string): Promise<Task | undefined> => {
   return tasks.find((t) => t.id === taskId);
 };
 
+const deleteLocalTaskById = async (taskId: string): Promise<void> => {
+  try {
+    const snapshot = await db.ref(LOCAL_TASKS_PATH).get();
+    const raw = snapshot.val();
+
+    if (!raw || typeof raw !== 'object') return;
+
+    const anyRaw: Record<string, any> = raw; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const updates: Record<string, null> = {};
+
+    Object.entries(anyRaw).forEach(([key, item]) => {
+      if (!item) return;
+      if (item.id === taskId) {
+        updates[key] = null;
+      }
+    });
+
+    if (Object.keys(updates).length > 0) {
+      await db.ref(LOCAL_TASKS_PATH).update(updates);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('Error deleting local task by id:', err);
+  }
+};
+
 const loadTaskForSession = async (
   taskId: string,
   source?: SessionTaskSource,
@@ -110,6 +138,118 @@ const loadTaskForSession = async (
     // eslint-disable-next-line no-console
     console.error('Error loading task for session:', err);
     return undefined;
+  }
+};
+
+const removeLocalSlackTasksForJiraKey = async (
+  jiraKey: string,
+): Promise<{ id: string; title: string }[]> => {
+  try {
+    const snapshot = await db.ref(LOCAL_TASKS_PATH).get();
+    const raw = snapshot.val();
+
+    if (!raw || typeof raw !== 'object') return [];
+
+    const anyRaw: Record<string, any> = raw; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const updates: Record<string, null> = {};
+    const removed: { id: string; title: string }[] = [];
+
+    Object.entries(anyRaw).forEach(([id, item]) => {
+      if (!item) return;
+      const labels: string[] | undefined = Array.isArray(item.labels)
+        ? item.labels
+        : undefined;
+      if (!labels) return;
+
+      const hasSlack = labels.includes('slack');
+      const hasMatchingJiraKey = labels.includes(`JIRA_KEY:${jiraKey}`);
+
+      if (hasSlack && hasMatchingJiraKey) {
+        updates[id] = null;
+        removed.push({
+          id: item.id ?? id,
+          title: item.title ?? '',
+        });
+      }
+    });
+
+    if (Object.keys(updates).length > 0) {
+      await db.ref(LOCAL_TASKS_PATH).update(updates);
+    }
+
+    return removed;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      'Error removing local Slack tasks for Jira key:',
+      err,
+    );
+    return [];
+  }
+};
+
+const removeLocalSlackTasksForJiraContext = async (
+  title: string,
+  description: string,
+): Promise<{ id: string; title: string }[]> => {
+  try {
+    const snapshot = await db.ref(LOCAL_TASKS_PATH).get();
+    const raw = snapshot.val();
+
+    if (!raw || typeof raw !== 'object') return [];
+
+    const anyRaw: Record<string, any> = raw; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const updates: Record<string, null> = {};
+    const removed: { id: string; title: string }[] = [];
+
+    const normalize = (text: string): string[] => {
+      return text
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length >= 4);
+    };
+
+    const jiraTokens = new Set(
+      normalize(`${title ?? ''} ${description ?? ''}`),
+    );
+    if (!jiraTokens.size) return;
+
+    Object.entries(anyRaw).forEach(([id, item]) => {
+      if (!item) return;
+      const labels: string[] | undefined = Array.isArray(item.labels)
+        ? item.labels
+        : undefined;
+      if (!labels || !labels.includes('slack')) return;
+
+      const slackText = `${item.title ?? ''} ${item.description ?? ''}`;
+      const slackTokens = normalize(slackText);
+
+      const overlapCount = slackTokens.reduce((count, token) => {
+        return jiraTokens.has(token) ? count + 1 : count;
+      }, 0);
+
+      if (overlapCount >= 2) {
+        updates[id] = null;
+        removed.push({
+          id: item.id ?? id,
+          title: item.title ?? '',
+        });
+      }
+    });
+
+    if (Object.keys(updates).length > 0) {
+      await db.ref(LOCAL_TASKS_PATH).update(updates);
+    }
+
+    return removed;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      'Error removing local Slack tasks for Jira context:',
+      err,
+    );
+    return [];
   }
 };
 
@@ -332,8 +472,19 @@ router.post('/session/end', async (req, res) => {
         (await loadTaskForSession(rawSession.taskId, rawSession.taskSource))) ||
       undefined;
 
+    // If this session was for a Slack-derived local task, consider it
+    // completed once the session ends and remove it from the local backlog.
+    if (
+      rawSession.taskSource === 'LOCAL' &&
+      rawSession.taskId &&
+      task?.labels?.includes('slack')
+    ) {
+      await deleteLocalTaskById(rawSession.taskId);
+    }
+
     // Enrich with external issue details and state when possible for richer summaries.
     let issueDetails: SessionAgentInput['issueDetails'] | undefined;
+    let removedSlackTasksForIssue: { id: string; title: string }[] = [];
     try {
       const effectiveUrl = task?.url ?? rawSession.taskUrl;
 
@@ -374,12 +525,82 @@ router.post('/session/end', async (req, res) => {
         const key = parseJiraIssueKeyFromUrl(effectiveUrl);
         if (key) {
           const details = await getJiraIssueDetails(key);
+          const stateAfter = (details as any).status as string | undefined;
+          const stateBefore = rawSession.issueStateAtStart;
+
+          const normalizedBefore = stateBefore?.toLowerCase();
+          const normalizedAfter = stateAfter?.toLowerCase();
+
+          const isDone = (status?: string) => {
+            if (!status) return false;
+            const s = status.toLowerCase();
+            return (
+              s.includes('done') ||
+              s.includes('resolved') ||
+              s.includes('closed') ||
+              s.includes('complete')
+            );
+          };
+
+          const closedDuringSession =
+            isDone(stateAfter) ||
+            (!!normalizedBefore &&
+              !isDone(normalizedBefore) &&
+              isDone(normalizedAfter));
+
           issueDetails = {
             source: 'JIRA',
             title: details.title,
             description: details.description,
             url: details.url,
+            stateBefore,
+            stateAfter,
+            closedDuringSession,
           };
+
+          if (closedDuringSession) {
+            const removedByKey = await removeLocalSlackTasksForJiraKey(key);
+            const removedByContext =
+              await removeLocalSlackTasksForJiraContext(
+                details.title,
+                details.description,
+              );
+
+            const merged = new Map<string, string>();
+            [...removedByKey, ...removedByContext].forEach((t) => {
+              if (!merged.has(t.id)) {
+                merged.set(t.id, t.title);
+              }
+            });
+
+            removedSlackTasksForIssue = Array.from(
+              merged.entries(),
+            ).map(([id, title]) => ({ id, title }));
+
+            if (removedSlackTasksForIssue.length > 0) {
+              const titles = removedSlackTasksForIssue
+                .map((t) => (t.title || '').trim())
+                .filter(Boolean)
+                .join(', ');
+
+              const notification: Notification = {
+                id: uuidv4(),
+                userId: DEMO_USER_ID,
+                source: 'SLACK',
+                rawText:
+                  titles.length > 0
+                    ? `Removed Slack tasks [${titles}] because Jira issue ${key} was completed.`
+                    : `Removed Slack tasks linked to Jira issue ${key} because it was completed.`,
+                createdAt: new Date().toISOString(),
+                processed: false,
+                interruptDecision: undefined,
+              };
+
+              await db
+                .ref(`${NOTIFICATIONS_PATH}/${notification.id}`)
+                .set(notification);
+            }
+          }
         }
       }
     } catch (err) {
@@ -407,6 +628,20 @@ router.post('/session/end', async (req, res) => {
         },
       };
       augmentedEvents = [...events, syntheticEvent];
+    }
+
+    if (removedSlackTasksForIssue.length > 0) {
+      const syntheticSlackCleanup: SessionEvent = {
+        id: `slack-cleanup-${sessionId}`,
+        sessionId,
+        type: 'SYSTEM',
+        timestamp: new Date().toISOString(),
+        payload: {
+          kind: 'SLACK_TASKS_REMOVED_FOR_JIRA',
+          tasks: removedSlackTasksForIssue,
+        },
+      };
+      augmentedEvents = [...augmentedEvents, syntheticSlackCleanup];
     }
 
     const summaryInput: SessionAgentInput = {
@@ -461,6 +696,33 @@ router.post('/session/end', async (req, res) => {
       summaryResult.nextSteps.push(
         'Verify the fix in staging/production and monitor for regressions.',
       );
+    }
+
+    if (removedSlackTasksForIssue.length > 0) {
+      const titles = removedSlackTasksForIssue
+        .map((t) => (t.title || '').trim())
+        .filter(Boolean);
+
+      if (titles.length > 0) {
+        const cleanupSentence = `The following Slack-derived tasks were removed from your backlog because the linked Jira issue was completed: ${titles
+          .map((t) => `"${t}"`)
+          .join(', ')}.`;
+
+        if (!summaryResult.sessionSummary) {
+          summaryResult.sessionSummary = cleanupSentence;
+        } else if (
+          !summaryResult.sessionSummary.includes(
+            'Slack-derived tasks were removed from your backlog',
+          )
+        ) {
+          summaryResult.sessionSummary = `${summaryResult.sessionSummary} ${cleanupSentence}`;
+        }
+
+        if (!summaryResult.keyDecisions) summaryResult.keyDecisions = [];
+        summaryResult.keyDecisions.push(
+          `Cleaned up related Slack tasks: ${titles.join(', ')}`,
+        );
+      }
     }
 
     const now = new Date().toISOString();

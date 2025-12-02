@@ -9,9 +9,16 @@ type RawJiraIssue = {
   url?: string;
   self?: string;
   browserUrl?: string;
+  dueDate?: string;
+  duedate?: string;
   fields?: {
     summary?: string;
     description?: string;
+    duedate?: string;
+    dueDate?: string;
+    status?: {
+      name?: string;
+    };
   };
   title?: string;
   description?: string;
@@ -37,12 +44,25 @@ const mapJiraIssueToTask = (issue: RawJiraIssue): Task => {
     issue.browserUrl ??
     issue.self;
 
+  const dueDate =
+    issue.fields?.duedate ??
+    issue.fields?.dueDate ??
+    issue.dueDate ??
+    issue.duedate;
+
+  const labels: string[] = [];
+  if (issue.key) {
+    labels.push(`JIRA_KEY:${issue.key}`);
+  }
+
   return {
     id,
     title,
     description,
     url,
     source: 'JIRA',
+    ...(labels.length ? { labels } : {}),
+    ...(dueDate ? { dueDate } : {}),
   };
 };
 
@@ -71,7 +91,7 @@ export const getAssignedJiraIssues = async (): Promise<Task[]> => {
 
 export const getJiraIssueDetails = async (
   issueKey: string,
-): Promise<{ title: string; description: string; url: string }> => {
+): Promise<{ title: string; description: string; url: string; status?: string }> => {
   try {
     const response = await axios.get(
       `${MCP_BASE_URL}/tools/getJiraIssueDetails`,
@@ -83,10 +103,17 @@ export const getJiraIssueDetails = async (
     const data: RawJiraIssue = response.data;
     const task = mapJiraIssueToTask(data);
 
+    const status =
+      data.fields?.status?.name ??
+      // Fallbacks for slightly different shapes
+      (data as any).status?.name ??
+      (data as any).status;
+
     return {
       title: task.title,
       description: task.description ?? '',
       url: task.url ?? '',
+      ...(status ? { status: String(status) } : {}),
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -94,4 +121,3 @@ export const getJiraIssueDetails = async (
     throw new Error('Failed to fetch Jira issue details from MCP');
   }
 };
-

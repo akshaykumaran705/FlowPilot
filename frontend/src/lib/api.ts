@@ -47,6 +47,7 @@ export interface BackendTask {
   url?: string;
   source: 'GITHUB' | 'JIRA' | 'LOCAL';
   labels?: string[];
+  dueDate?: string;
 }
 
 export interface BackendPlanBlock {
@@ -91,6 +92,31 @@ export interface BackendSessionEvent {
   timestamp: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   payload: any;
+}
+
+export type BackendInterruptPriority = 'URGENT' | 'LATER' | 'IGNORE';
+
+export type BackendInterruptAction =
+  | 'START_NOW'
+  | 'ADD_TO_EXISTING_BLOCK'
+  | 'CREATE_NEW_BLOCK'
+  | 'IGNORE';
+
+export interface BackendNotificationInterruptDecision {
+  priority: BackendInterruptPriority;
+  suggestedAction: BackendInterruptAction;
+  suggestedBlockId?: string;
+  rationale: string;
+}
+
+export interface BackendNotification {
+  id: string;
+  userId: string;
+  source: 'GITHUB' | 'SLACK' | 'CALENDAR' | 'JIRA';
+  rawText: string;
+  createdAt: string;
+  processed: boolean;
+  interruptDecision?: BackendNotificationInterruptDecision;
 }
 
 export interface BackendSettings {
@@ -199,3 +225,55 @@ export async function getSessionWithEvents(
   );
 }
 
+export async function listNotifications(
+  processed?: boolean,
+): Promise<BackendNotification[]> {
+  const query =
+    processed === undefined ? '' : `?processed=${processed ? 'true' : 'false'}`;
+  return apiRequest<BackendNotification[]>(`/notifications${query}`);
+}
+
+export async function markNotificationProcessed(
+  id: string,
+): Promise<BackendNotification> {
+  return apiRequest<BackendNotification>(
+    `/notifications/${encodeURIComponent(id)}/mark-processed`,
+    {
+      method: 'POST',
+    },
+  );
+}
+
+export async function pollSlackNotifications(): Promise<{
+  created: BackendNotification[];
+  lastTs: string | null;
+}> {
+  return apiRequest<{ created: BackendNotification[]; lastTs: string | null }>(
+    '/notifications/slack/poll',
+    {
+      method: 'POST',
+    },
+  );
+}
+
+export async function scheduleNotificationNow(
+  id: string,
+): Promise<{ notification: BackendNotification; task: BackendTask }> {
+  return apiRequest<{ notification: BackendNotification; task: BackendTask }>(
+    `/notifications/${encodeURIComponent(id)}/schedule-now`,
+    {
+      method: 'POST',
+    },
+  );
+}
+
+export async function scheduleNotificationLater(
+  id: string,
+): Promise<{ notification: BackendNotification; task: BackendTask }> {
+  return apiRequest<{ notification: BackendNotification; task: BackendTask }>(
+    `/notifications/${encodeURIComponent(id)}/schedule-later`,
+    {
+      method: 'POST',
+    },
+  );
+}

@@ -40,12 +40,12 @@ app.get('/tools/getAssignedIssues', async (_req, res) => {
 
   try {
     const jql =
-      'assignee = currentUser() AND resolution = Unresolved ORDER BY priority DESC';
+      'assignee = currentUser() AND statusCategory != Done ORDER BY priority DESC';
 
     const response = await jiraApi.post('/rest/api/3/search/jql', {
       jql,
       maxResults: 50,
-      fields: ['summary', 'description', 'status', 'priority'],
+      fields: ['summary', 'description', 'status', 'priority', 'duedate'],
     });
 
     res.json(response.data.issues ?? []);
