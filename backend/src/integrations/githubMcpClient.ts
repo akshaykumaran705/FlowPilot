@@ -12,6 +12,7 @@ type RawIssue = {
   url?: string;
   html_url?: string;
   labels?: Array<string | { name?: string }>;
+  state?: string;
 };
 
 const mapLabels = (labels: RawIssue['labels']): string[] | undefined => {
@@ -66,7 +67,7 @@ export const getIssueDetails = async (
   owner: string,
   repo: string,
   issueNumber: number,
-): Promise<{ title: string; body: string; url: string }> => {
+): Promise<{ title: string; body: string; url: string; state?: string }> => {
   try {
     const response = await axios.get(
       `${MCP_BASE_URL}/tools/getIssueDetails`,
@@ -81,6 +82,7 @@ export const getIssueDetails = async (
       title: data.title ?? 'Untitled issue',
       body: data.body ?? data.description ?? '',
       url: data.html_url ?? data.url ?? '',
+      state: data.state,
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -88,4 +90,3 @@ export const getIssueDetails = async (
     throw new Error('Failed to fetch GitHub issue details from MCP');
   }
 };
-

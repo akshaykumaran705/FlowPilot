@@ -1,6 +1,16 @@
 import { getSessionModel } from './geminiClient';
 import { SessionEvent } from '../types/core';
 
+export interface SessionAgentIssueDetails {
+  source: 'GITHUB' | 'JIRA';
+  title: string;
+  description?: string;
+  url?: string;
+  stateBefore?: string;
+  stateAfter?: string;
+  closedDuringSession?: boolean;
+}
+
 export interface SessionAgentInput {
   taskTitle: string;
   taskDescription?: string;
@@ -8,6 +18,7 @@ export interface SessionAgentInput {
   events: SessionEvent[];
   slackSummary?: string;
   prDiffSummary?: string;
+  issueDetails?: SessionAgentIssueDetails;
 }
 
 export interface SessionAgentOutput {
@@ -134,6 +145,9 @@ Task context:
 - Title: ${input.taskTitle}
 - Description: ${input.taskDescription ?? '(none provided)'}
 
+Issue context (if any, JSON):
+${input.issueDetails ? JSON.stringify(input.issueDetails, null, 2) : '(none)'}
+
 Previous session summary (if any):
 ${input.previousSessionSummary ?? '(none)'}
 
@@ -158,4 +172,3 @@ Do not include markdown or any text outside the JSON.
 
   return parseSessionOutput(text);
 };
-

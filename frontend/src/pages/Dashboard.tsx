@@ -200,10 +200,18 @@ export default function Dashboard() {
     if (!user) return;
 
     try {
-      // For now, treat all tasks as LOCAL when starting sessions.
+      const task = tasks.find((t) => t.id === taskId);
+      let source: 'GITHUB' | 'JIRA' | 'LOCAL' | undefined;
+
+      if (task?.source === 'github') {
+        source = 'GITHUB';
+      } else {
+        source = 'LOCAL';
+      }
+
       const session = await startSession({
         taskId,
-        source: 'LOCAL',
+        source,
       });
 
       navigate(`/session/${session.id}`);
