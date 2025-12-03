@@ -32,6 +32,91 @@ const loadDayPlanOrEmpty = async (date: string): Promise<DayPlan> => {
   return value as DayPlan;
 };
 
+const insertTaskIntoTodayPlan = async (task: Task): Promise<void> => {
+  const today = getTodayDateString();
+
+  try {
+    const snapshot = await db.ref(`${PLANS_PATH}/${today}`).get();
+    const value = snapshot.val();
+
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+
+    const plan = value as DayPlan;
+    const blocks = Array.isArray(plan.blocks) ? [...plan.blocks] : [];
+
+    const now = new Date();
+    const durationMinutes = 30;
+    const durationMs = durationMinutes * 60 * 1000;
+
+    const parseTime = (iso: string): number => new Date(iso).getTime();
+
+    const sortedBlocks = blocks
+      .map((b) => ({
+        ...b,
+        _startMs: parseTime(b.start),
+        _endMs: parseTime(b.end),
+      }))
+      .sort((a, b) => a._startMs - b._startMs);
+
+    let candidateStart = now.getTime();
+    let candidateEnd = candidateStart + durationMs;
+
+    for (const block of sortedBlocks) {
+      if (
+        Number.isNaN(block._startMs) ||
+        Number.isNaN(block._endMs)
+      ) {
+        // Skip malformed blocks.
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+
+      // If the candidate slot ends before this block starts, we found a gap.
+      if (candidateEnd <= block._startMs) {
+        break;
+      }
+
+      // If the candidate slot starts after this block ends, keep searching.
+      if (candidateStart >= block._endMs) {
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+
+      // Otherwise, there is overlap; move the candidate start to the end of this block.
+      candidateStart = block._endMs;
+      candidateEnd = candidateStart + durationMs;
+    }
+
+    const startIso = new Date(candidateStart).toISOString();
+    const endIso = new Date(candidateEnd).toISOString();
+
+    const newBlockId = `slack-${task.id}-${Date.now()}`;
+
+    const newBlock = {
+      id: newBlockId,
+      start: startIso,
+      end: endIso,
+      label: task.title || 'Slack task',
+      mode: 'SHALLOW' as const,
+      taskIds: [task.id],
+      ...(task.description ? { notes: task.description } : {}),
+    };
+
+    const updatedPlan: DayPlan = {
+      ...plan,
+      blocks: [...blocks, newBlock],
+      generatedAt: new Date().toISOString(),
+    };
+
+    await db.ref(`${PLANS_PATH}/${today}`).set(updatedPlan);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('Error inserting Slack task into today plan:', err);
+  }
+};
+
 const mapRawNotifications = (raw: unknown): Notification[] => {
   if (!raw || typeof raw !== 'object') return [];
 
@@ -142,23 +227,67 @@ router.post('/notifications/slack/poll', async (_req, res) => {
         currentPlan,
       });
 
+      // eslint-disable-next-line no-console
+      console.log('Slack interrupt decision:', {
+        text: mention.text,
+        priority: decision.priority,
+        suggestedAction: decision.suggestedAction,
+      });
+
       const rawId = `${mention.channelId}-${mention.ts}`;
       const id = makeSafeId(rawId);
       const createdAt = new Date().toISOString();
 
-      const notification: Notification = {
-        id,
-        userId: DEMO_USER_ID,
-        source: 'SLACK',
-        rawText: mention.text,
-        createdAt,
-        processed: false,
-        interruptDecision: decision,
-      };
+      if (decision.priority === 'URGENT') {
+        const notification: Notification = {
+          id,
+          userId: DEMO_USER_ID,
+          source: 'SLACK',
+          rawText: mention.text,
+          createdAt,
+          processed: false,
+          interruptDecision: decision,
+        };
 
-      // eslint-disable-next-line no-await-in-loop
-      await db.ref(`${NOTIFICATIONS_PATH}/${id}`).set(notification);
-      notifications.push(notification);
+        // eslint-disable-next-line no-await-in-loop
+        await db.ref(`${NOTIFICATIONS_PATH}/${id}`).set(notification);
+        notifications.push(notification);
+      } else if (decision.priority === 'LATER') {
+        const notification: Notification = {
+          id,
+          userId: DEMO_USER_ID,
+          source: 'SLACK',
+          rawText: mention.text,
+          createdAt,
+          processed: true,
+          interruptDecision: decision,
+        };
+
+        // eslint-disable-next-line no-await-in-loop
+        await db.ref(`${NOTIFICATIONS_PATH}/${id}`).set(notification);
+
+        const now = new Date();
+        const later = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        const laterDate = later.toISOString().slice(0, 10);
+
+        // Automatically create a local task for non-urgent work,
+        // scheduled for a later date.
+        // eslint-disable-next-line no-await-in-loop
+        await ensureLocalTaskForNotification(notification, laterDate);
+      } else {
+        const notification: Notification = {
+          id,
+          userId: DEMO_USER_ID,
+          source: 'SLACK',
+          rawText: mention.text,
+          createdAt,
+          processed: true,
+          interruptDecision: decision,
+        };
+
+        // eslint-disable-next-line no-await-in-loop
+        await db.ref(`${NOTIFICATIONS_PATH}/${id}`).set(notification);
+      }
     }
 
     const lastTs = mentions
@@ -312,6 +441,8 @@ router.post('/notifications/:id/schedule-now', async (req, res) => {
 
     const nowDate = new Date().toISOString().slice(0, 10);
     const task = await ensureLocalTaskForNotification(notification, nowDate);
+
+    await insertTaskIntoTodayPlan(task);
 
     await ref.update({ processed: true });
 

@@ -90,12 +90,26 @@ const parseInterruptOutput = (raw: string): InterruptAgentOutput => {
         ? parsed.rationale
         : 'Model did not provide a rationale.';
 
-    return {
+    const base: InterruptAgentOutput = {
       priority,
       suggestedAction,
-      suggestedBlockId: parsed.suggestedBlockId,
       rationale,
     };
+
+    const suggestedBlockId =
+      typeof parsed.suggestedBlockId === 'string' &&
+      parsed.suggestedBlockId.trim().length > 0
+        ? parsed.suggestedBlockId.trim()
+        : undefined;
+
+    if (suggestedBlockId) {
+      return {
+        ...base,
+        suggestedBlockId,
+      };
+    }
+
+    return base;
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(
@@ -154,4 +168,3 @@ Do not include any explanation or markdown outside the JSON.
 
   return parseInterruptOutput(text);
 };
-

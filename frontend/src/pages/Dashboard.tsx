@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Navbar } from '@/components/layout/Navbar';
@@ -18,7 +18,6 @@ import {
   listNotifications,
   pollSlackNotifications,
   scheduleNotificationNow,
-  scheduleNotificationLater,
   planDay,
   updateSettings,
 } from '@/lib/api';
@@ -54,6 +53,42 @@ export default function Dashboard() {
     return text.replace(/<@[^>]+>/g, '').replace(/\s+/g, ' ').trim();
   };
 
+  const refreshSlackNotifications = useCallback(async () => {
+    if (!user) return;
+
+    try {
+      await pollSlackNotifications();
+      const notifications = await listNotifications(false);
+      const slack = notifications.filter(
+        (n) =>
+          n.source === 'SLACK' &&
+          !n.processed &&
+          n.interruptDecision?.priority === 'URGENT',
+      );
+
+      if (slack.length > 0) {
+        const mapped = slack.map((n) => {
+          const recommendation = n.interruptDecision
+            ? `${n.interruptDecision.priority} · ${n.interruptDecision.suggestedAction}`
+            : 'New work detected';
+
+          return {
+            id: n.id,
+            text: cleanSlackText(n.rawText),
+            recommendation,
+          };
+        });
+
+        setSlackNotifications(mapped);
+      } else {
+        setSlackNotifications([]);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to refresh Slack notifications:', err);
+    }
+  }, [user]);
+
   useEffect(() => {
     if (!authLoading && !user) {
       navigate('/auth');
@@ -65,6 +100,16 @@ export default function Dashboard() {
       loadData();
     }
   }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const intervalId = setInterval(() => {
+      refreshSlackNotifications();
+    }, 30000);
+
+    return () => clearInterval(intervalId);
+  }, [user, refreshSlackNotifications]);
 
   const loadData = async () => {
     if (!user) return;
@@ -157,29 +202,7 @@ export default function Dashboard() {
       }
 
       try {
-        await pollSlackNotifications();
-        const notifications = await listNotifications(false);
-        const slack = notifications.filter(
-          (n) => n.source === 'SLACK' && !n.processed,
-        );
-
-        if (slack.length > 0) {
-          const mapped = slack.map((n) => {
-            const recommendation = n.interruptDecision
-              ? `${n.interruptDecision.priority} · ${n.interruptDecision.suggestedAction}`
-              : 'New work detected';
-
-            return {
-              id: n.id,
-              text: cleanSlackText(n.rawText),
-              recommendation,
-            };
-          });
-
-          setSlackNotifications(mapped);
-        } else {
-          setSlackNotifications([]);
-        }
+        await refreshSlackNotifications();
       } catch (err) {
         // If Slack polling fails, continue without blocking the dashboard.
         // eslint-disable-next-line no-console
@@ -260,9 +283,7 @@ export default function Dashboard() {
 
   const handleScheduleSlackNow = async (notificationId: string) => {
     try {
-      const todayStr = format(new Date(), 'yyyy-MM-dd');
       await scheduleNotificationNow(notificationId);
-      await planDay(todayStr);
       await loadData();
       setSlackNotifications((prev) =>
         prev.filter((n) => n.id !== notificationId),
@@ -271,27 +292,6 @@ export default function Dashboard() {
       toast({
         title: 'Slack task scheduled',
         description: 'It has been added to today’s plan.',
-      });
-    } catch (error: any) {
-      toast({
-        title: 'Error scheduling Slack task',
-        description: error.message,
-        variant: 'destructive',
-      });
-    }
-  };
-
-  const handleScheduleSlackLater = async (notificationId: string) => {
-    try {
-      await scheduleNotificationLater(notificationId);
-      setSlackNotifications((prev) =>
-        prev.filter((n) => n.id !== notificationId),
-      );
-
-      toast({
-        title: 'Slack task saved for later',
-        description:
-          'It will be considered in your next day’s planning based on its due date.',
       });
     } catch (error: any) {
       toast({
@@ -389,15 +389,6 @@ export default function Dashboard() {
                   }
                 >
                   Add Now
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    handleScheduleSlackLater(slackNotifications[0].id)
-                  }
-                >
-                  Schedule Later
                 </Button>
               </div>
             </div>
