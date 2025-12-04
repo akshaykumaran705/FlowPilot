@@ -44,7 +44,9 @@ const mapIssueToTask = (issue: RawIssue): Task => {
 
 export const getAssignedIssues = async (): Promise<Task[]> => {
   try {
-    const response = await axios.get(`${MCP_BASE_URL}/tools/getAssignedIssues`);
+    const response = await axios.get(`${MCP_BASE_URL}/tools/getAssignedIssues`, {
+      timeout: 10000, // 10 second timeout
+    });
     const data = response.data;
 
     const issues: RawIssue[] = Array.isArray(data)
@@ -56,9 +58,10 @@ export const getAssignedIssues = async (): Promise<Task[]> => {
       : [];
 
     return issues.map(mapIssueToTask);
-  } catch (err) {
+  } catch (err: any) {
     // eslint-disable-next-line no-console
     console.error('Error fetching assigned GitHub issues from MCP:', err);
+    // Return empty array on error - don't break the app if MCP is down
     return [];
   }
 };
@@ -73,6 +76,7 @@ export const getIssueDetails = async (
       `${MCP_BASE_URL}/tools/getIssueDetails`,
       {
         params: { owner, repo, issueNumber },
+        timeout: 10000, // 10 second timeout
       },
     );
 

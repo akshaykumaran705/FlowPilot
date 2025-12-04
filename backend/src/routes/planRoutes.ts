@@ -81,15 +81,38 @@ router.post('/plan-day', async (req, res) => {
   const requestedDate = (req.body?.date as string | undefined) || undefined;
   const date = requestedDate || getTodayDateString();
 
+  // Validate date format
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD' });
+    return;
+  }
+
   try {
-    const [{ timezone, workStart, workEnd }, githubTasks, jiraTasks, localTasks, events] =
-      await Promise.all([
-        loadSettings(),
-        getGithubAssignedIssues(),
-        getAssignedJiraIssues(),
-        loadLocalTasks(),
-        getDayEvents(date, undefined as unknown as string),
-      ]);
+    // Use Promise.allSettled to handle partial failures gracefully
+    const results = await Promise.allSettled([
+      loadSettings(),
+      getGithubAssignedIssues(),
+      getAssignedJiraIssues(),
+      loadLocalTasks(),
+      getDayEvents(date, undefined as unknown as string),
+    ]);
+
+    const timezone = results[0].status === 'fulfilled' ? results[0].value.timezone : env.defaultTimezone;
+    const workStart = results[0].status === 'fulfilled' ? results[0].value.workStart : env.defaultWorkStart;
+    const workEnd = results[0].status === 'fulfilled' ? results[0].value.workEnd : env.defaultWorkEnd;
+    const githubTasks = results[1].status === 'fulfilled' ? results[1].value : [];
+    const jiraTasks = results[2].status === 'fulfilled' ? results[2].value : [];
+    const localTasks = results[3].status === 'fulfilled' ? results[3].value : [];
+    const events = results[4].status === 'fulfilled' ? results[4].value : [];
+
+    // Log any failures but continue
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const sources = ['settings', 'GitHub', 'Jira', 'local tasks', 'calendar'];
+        // eslint-disable-next-line no-console
+        console.warn(`Failed to load ${sources[index]}:`, result.reason);
+      }
+    });
 
     const effectiveTimezone = timezone || env.defaultTimezone;
 

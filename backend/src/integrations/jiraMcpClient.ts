@@ -24,6 +24,35 @@ type RawJiraIssue = {
   description?: string;
 };
 
+// Helper to extract text from Jira's doc format (Atlassian Document Format)
+const extractTextFromJiraDoc = (doc: any): string => {
+  if (!doc) return '';
+  if (typeof doc === 'string') return doc;
+  if (typeof doc !== 'object') return String(doc);
+
+  // Handle Atlassian Document Format
+  if (doc.type === 'doc' && Array.isArray(doc.content)) {
+    const extractText = (node: any): string => {
+      if (typeof node === 'string') return node;
+      if (!node || typeof node !== 'object') return '';
+
+      if (node.type === 'text' && typeof node.text === 'string') {
+        return node.text;
+      }
+
+      if (Array.isArray(node.content)) {
+        return node.content.map(extractText).join(' ');
+      }
+
+      return '';
+    };
+
+    return doc.content.map(extractText).join(' ').trim();
+  }
+
+  return '';
+};
+
 const mapJiraIssueToTask = (issue: RawJiraIssue): Task => {
   const id =
     issue.key ??
@@ -35,9 +64,13 @@ const mapJiraIssueToTask = (issue: RawJiraIssue): Task => {
     issue.title ??
     'Untitled Jira issue';
 
-  const description =
-    issue.fields?.description ??
-    issue.description;
+  // Handle description which can be string, object (doc format), or undefined
+  let description: string | undefined;
+  if (issue.fields?.description !== undefined) {
+    description = extractTextFromJiraDoc(issue.fields.description);
+  } else if (issue.description !== undefined) {
+    description = extractTextFromJiraDoc(issue.description);
+  }
 
   const url =
     issue.url ??
@@ -70,6 +103,9 @@ export const getAssignedJiraIssues = async (): Promise<Task[]> => {
   try {
     const response = await axios.get(
       `${MCP_BASE_URL}/tools/getAssignedIssues`,
+      {
+        timeout: 10000, // 10 second timeout
+      },
     );
     const data = response.data;
 
@@ -82,9 +118,10 @@ export const getAssignedJiraIssues = async (): Promise<Task[]> => {
       : [];
 
     return issues.map(mapJiraIssueToTask);
-  } catch (err) {
+  } catch (err: any) {
     // eslint-disable-next-line no-console
     console.error('Error fetching assigned Jira issues from MCP:', err);
+    // Return empty array on error - don't break the app if MCP is down
     return [];
   }
 };
@@ -97,6 +134,7 @@ export const getJiraIssueDetails = async (
       `${MCP_BASE_URL}/tools/getJiraIssueDetails`,
       {
         params: { issueKey },
+        timeout: 10000, // 10 second timeout
       },
     );
 
@@ -115,9 +153,18 @@ export const getJiraIssueDetails = async (
       url: task.url ?? '',
       ...(status ? { status: String(status) } : {}),
     };
-  } catch (err) {
+  } catch (err: any) {
     // eslint-disable-next-line no-console
     console.error('Error fetching Jira issue details from MCP:', err);
-    throw new Error('Failed to fetch Jira issue details from MCP');
+    
+    // Provide more specific error messages
+    if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+      throw new Error('Jira MCP server is unavailable. Please check if it is running.');
+    }
+    if (err.response?.status === 404) {
+      throw new Error(`Jira issue ${issueKey} not found. It may have been deleted.`);
+    }
+    
+    throw new Error(`Failed to fetch Jira issue details: ${err.message || 'Unknown error'}`);
   }
 };

@@ -141,56 +141,10 @@ const loadTaskForSession = async (
   }
 };
 
-const removeLocalSlackTasksForJiraKey = async (
-  jiraKey: string,
-): Promise<{ id: string; title: string }[]> => {
-  try {
-    const snapshot = await db.ref(LOCAL_TASKS_PATH).get();
-    const raw = snapshot.val();
-
-    if (!raw || typeof raw !== 'object') return [];
-
-    const anyRaw: Record<string, any> = raw; // eslint-disable-line @typescript-eslint/no-explicit-any
-    const updates: Record<string, null> = {};
-    const removed: { id: string; title: string }[] = [];
-
-    Object.entries(anyRaw).forEach(([id, item]) => {
-      if (!item) return;
-      const labels: string[] | undefined = Array.isArray(item.labels)
-        ? item.labels
-        : undefined;
-      if (!labels) return;
-
-      const hasSlack = labels.includes('slack');
-      const hasMatchingJiraKey = labels.includes(`JIRA_KEY:${jiraKey}`);
-
-      if (hasSlack && hasMatchingJiraKey) {
-        updates[id] = null;
-        removed.push({
-          id: item.id ?? id,
-          title: item.title ?? '',
-        });
-      }
-    });
-
-    if (Object.keys(updates).length > 0) {
-      await db.ref(LOCAL_TASKS_PATH).update(updates);
-    }
-
-    return removed;
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(
-      'Error removing local Slack tasks for Jira key:',
-      err,
-    );
-    return [];
-  }
-};
-
 const removeLocalSlackTasksForJiraContext = async (
   title: string,
   description: string,
+  jiraKey?: string,
 ): Promise<{ id: string; title: string }[]> => {
   try {
     const snapshot = await db.ref(LOCAL_TASKS_PATH).get();
@@ -203,17 +157,19 @@ const removeLocalSlackTasksForJiraContext = async (
     const removed: { id: string; title: string }[] = [];
 
     const normalize = (text: string): string[] => {
+      if (!text || typeof text !== 'string') return [];
       return text
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, ' ')
         .split(/\s+/)
-        .filter((w) => w.length >= 4);
+        .filter((w) => w.length >= 3); // Reduced from 4 to 3 for better matching
     };
 
-    const jiraTokens = new Set(
-      normalize(`${title ?? ''} ${description ?? ''}`),
-    );
-    if (!jiraTokens.size) return;
+    const jiraText = `${title ?? ''} ${description ?? ''}`.trim();
+    const jiraTokens = new Set(normalize(jiraText));
+    
+    // If we have very few tokens (empty/short description), require exact Jira key match
+    const requiresExactKeyMatch = jiraTokens.size < 3;
 
     Object.entries(anyRaw).forEach(([id, item]) => {
       if (!item) return;
@@ -222,14 +178,39 @@ const removeLocalSlackTasksForJiraContext = async (
         : undefined;
       if (!labels || !labels.includes('slack')) return;
 
-      const slackText = `${item.title ?? ''} ${item.description ?? ''}`;
+      // If we have a Jira key, check for exact match first (more reliable)
+      if (jiraKey) {
+        const taskJiraKey = labels.find((l) => l.startsWith('JIRA_KEY:'))?.replace('JIRA_KEY:', '');
+        if (taskJiraKey === jiraKey) {
+          updates[id] = null;
+          removed.push({
+            id: item.id ?? id,
+            title: item.title ?? '',
+          });
+          return;
+        }
+      }
+
+      // Fallback to token-based matching if no exact key match
+      if (requiresExactKeyMatch) {
+        // Skip if we don't have enough tokens for reliable matching
+        return;
+      }
+
+      const slackText = `${item.title ?? ''} ${item.description ?? ''}`.trim();
+      if (!slackText) return;
+
       const slackTokens = normalize(slackText);
+      if (slackTokens.length === 0) return;
 
       const overlapCount = slackTokens.reduce((count, token) => {
         return jiraTokens.has(token) ? count + 1 : count;
       }, 0);
 
-      if (overlapCount >= 2) {
+      // Require at least 2 overlapping tokens, or if both are very short, require 1
+      const minOverlap = jiraTokens.size <= 2 && slackTokens.length <= 2 ? 1 : 2;
+      
+      if (overlapCount >= minOverlap) {
         updates[id] = null;
         removed.push({
           id: item.id ?? id,
@@ -256,29 +237,34 @@ const removeLocalSlackTasksForJiraContext = async (
 const parseGithubIssueFromUrl = (
   url?: string,
 ): { owner: string; repo: string; issueNumber: number } | null => {
-  if (!url) return null;
+  if (!url || typeof url !== 'string' || url.trim() === '') return null;
   try {
     const parsed = new URL(url);
     const parts = parsed.pathname.split('/').filter(Boolean);
     if (parts.length < 4) return null;
     const [owner, repo, type, num] = parts;
-    if (type !== 'issues') return null;
+    if (type !== 'issues' && type !== 'pull') return null; // Support both issues and PRs
     const issueNumber = Number.parseInt(num, 10);
-    if (!owner || !repo || Number.isNaN(issueNumber)) return null;
+    if (!owner || !repo || Number.isNaN(issueNumber) || issueNumber <= 0) return null;
     return { owner, repo, issueNumber };
   } catch {
+    // Invalid URL format
     return null;
   }
 };
 
 const parseJiraIssueKeyFromUrl = (url?: string): string | null => {
-  if (!url) return null;
+  if (!url || typeof url !== 'string' || url.trim() === '') return null;
   try {
     const parsed = new URL(url);
     const parts = parsed.pathname.split('/').filter(Boolean);
     if (!parts.length) return null;
-    return parts[parts.length - 1];
+    const key = parts[parts.length - 1];
+    // Validate Jira key format: PROJECT-123
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key)) return null;
+    return key;
   } catch {
+    // Invalid URL format
     return null;
   }
 };
@@ -340,12 +326,43 @@ router.post('/session/start', async (req, res) => {
     return;
   }
 
+  // Check for existing active sessions for the same task
+  try {
+    const activeSessionsSnapshot = await db.ref(SESSIONS_PATH).get();
+    const activeSessions = activeSessionsSnapshot.val() || {};
+    const existingActive = Object.values(activeSessions).find(
+      (s: any) =>
+        s.status === 'active' &&
+        s.taskId === payload.taskId &&
+        s.userId === DEMO_USER_ID,
+    );
+    if (existingActive) {
+      res.status(409).json({
+        message: 'An active session already exists for this task',
+        existingSessionId: (existingActive as any).id,
+      });
+      return;
+    }
+  } catch (err) {
+    // Continue if check fails
+    // eslint-disable-next-line no-console
+    console.error('Error checking for existing active sessions:', err);
+  }
+
   const sessionId = uuidv4();
   const now = new Date().toISOString();
 
   try {
     const task =
       (await loadTaskForSession(payload.taskId, payload.source)) ?? undefined;
+
+    // Handle case where task no longer exists
+    if (!task) {
+      res.status(404).json({
+        message: `Task ${payload.taskId} not found. It may have been deleted.`,
+      });
+      return;
+    }
 
     let issueStateAtStart: string | undefined;
     try {
@@ -364,16 +381,36 @@ router.post('/session/start', async (req, res) => {
         const key = parseJiraIssueKeyFromUrl(task.url);
         if (key) {
           const details = await getJiraIssueDetails(key);
-          // Jira status is typically in the description we returned, so we skip for now
-          // but keep the hook for future enrichment.
           if ((details as any).status) {
             issueStateAtStart = (details as any).status;
+          }
+        }
+      } else if (payload.source === 'LOCAL' && task?.labels) {
+        // Check if this is a Slack task with a JIRA_KEY label
+        const jiraKeyLabel = task.labels.find((l: string) =>
+          l.startsWith('JIRA_KEY:'),
+        );
+        if (jiraKeyLabel) {
+          const jiraKey = jiraKeyLabel.replace('JIRA_KEY:', '');
+          try {
+            const details = await getJiraIssueDetails(jiraKey);
+            if ((details as any).status) {
+              issueStateAtStart = (details as any).status;
+            }
+          } catch (err) {
+            // Jira issue might not exist or MCP server down - continue anyway
+            // eslint-disable-next-line no-console
+            console.warn(
+              `Could not fetch Jira issue ${jiraKey} for Slack task:`,
+              err,
+            );
           }
         }
       }
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('Error fetching initial issue state for session:', err);
+      // Continue - issue state is optional
     }
 
     const session: SessionWithMeta = {
@@ -472,19 +509,94 @@ router.post('/session/end', async (req, res) => {
         (await loadTaskForSession(rawSession.taskId, rawSession.taskSource))) ||
       undefined;
 
-    // If this session was for a Slack-derived local task, consider it
-    // completed once the session ends and remove it from the local backlog.
+    // Handle case where task no longer exists - still allow session to end
+    if (!task && rawSession.taskId) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Task ${rawSession.taskId} not found when ending session ${sessionId}. It may have been deleted.`,
+      );
+    }
+
+    // If this session was for a Slack-derived local task, check if it has a JIRA_KEY label
+    // and if the linked Jira issue is closed, then clean up related Slack tasks
+    let removedSlackTasksForIssue: { id: string; title: string }[] = [];
+    
     if (
       rawSession.taskSource === 'LOCAL' &&
       rawSession.taskId &&
       task?.labels?.includes('slack')
     ) {
+      // Check if this Slack task has a JIRA_KEY label
+      const jiraKeyLabel = task.labels.find((l: string) =>
+        l.startsWith('JIRA_KEY:'),
+      );
+      
+      if (jiraKeyLabel) {
+        const jiraKey = jiraKeyLabel.replace('JIRA_KEY:', '');
+        try {
+          const jiraDetails = await getJiraIssueDetails(jiraKey);
+          const jiraStatus = (jiraDetails as any).status as string | undefined;
+          
+          const isDone = (status?: string) => {
+            if (!status) return false;
+            const s = status.toLowerCase();
+            return (
+              s.includes('done') ||
+              s.includes('resolved') ||
+              s.includes('closed') ||
+              s.includes('complete')
+            );
+          };
+          
+          // If Jira issue is done, clean up related Slack tasks
+          if (isDone(jiraStatus)) {
+            removedSlackTasksForIssue =
+              await removeLocalSlackTasksForJiraContext(
+                jiraDetails.title,
+                jiraDetails.description,
+                jiraKey, // Pass Jira key for exact matching
+              );
+            
+            if (removedSlackTasksForIssue.length > 0) {
+              const titles = removedSlackTasksForIssue
+                .map((t) => (t.title || '').trim())
+                .filter(Boolean)
+                .join(', ');
+
+              const notification: Notification = {
+                id: uuidv4(),
+                userId: DEMO_USER_ID,
+                source: 'SLACK',
+                rawText:
+                  titles.length > 0
+                    ? `Removed Slack tasks [${titles}] because Jira issue ${jiraKey} was completed.`
+                    : `Removed Slack tasks linked to Jira issue ${jiraKey} because it was completed.`,
+                createdAt: new Date().toISOString(),
+                processed: false,
+                interruptDecision: undefined,
+              };
+
+              await db
+                .ref(`${NOTIFICATIONS_PATH}/${notification.id}`)
+                .set(notification);
+            }
+          }
+        } catch (err) {
+          // Jira issue might not exist or MCP server down - continue anyway
+          // eslint-disable-next-line no-console
+          console.warn(
+            `Could not check Jira issue ${jiraKeyLabel} for cleanup:`,
+            err,
+          );
+        }
+      }
+      
+      // Remove the Slack task itself when session ends
       await deleteLocalTaskById(rawSession.taskId);
     }
 
     // Enrich with external issue details and state when possible for richer summaries.
     let issueDetails: SessionAgentInput['issueDetails'] | undefined;
-    let removedSlackTasksForIssue: { id: string; title: string }[] = [];
     try {
       const effectiveUrl = task?.url ?? rawSession.taskUrl;
 
@@ -542,11 +654,11 @@ router.post('/session/end', async (req, res) => {
             );
           };
 
+          // Check if issue was already closed at start or closed during session
+          const wasAlreadyClosed = isDone(stateBefore);
           const closedDuringSession =
-            isDone(stateAfter) ||
-            (!!normalizedBefore &&
-              !isDone(normalizedBefore) &&
-              isDone(normalizedAfter));
+            isDone(stateAfter) &&
+            (!wasAlreadyClosed || (!!normalizedBefore && !isDone(normalizedBefore) && isDone(normalizedAfter)));
 
           issueDetails = {
             source: 'JIRA',
@@ -558,24 +670,17 @@ router.post('/session/end', async (req, res) => {
             closedDuringSession,
           };
 
-          if (closedDuringSession) {
-            const removedByKey = await removeLocalSlackTasksForJiraKey(key);
-            const removedByContext =
-              await removeLocalSlackTasksForJiraContext(
-                details.title,
-                details.description,
-              );
-
-            const merged = new Map<string, string>();
-            [...removedByKey, ...removedByContext].forEach((t) => {
-              if (!merged.has(t.id)) {
-                merged.set(t.id, t.title);
-              }
-            });
-
-            removedSlackTasksForIssue = Array.from(
-              merged.entries(),
-            ).map(([id, title]) => ({ id, title }));
+          // Clean up Slack tasks if issue is done (whether closed during session or already was)
+          if (isDone(stateAfter)) {
+            // Only trigger cleanup if it wasn't already cleaned up above
+            if (removedSlackTasksForIssue.length === 0) {
+              removedSlackTasksForIssue =
+                await removeLocalSlackTasksForJiraContext(
+                  details.title,
+                  details.description,
+                  key, // Pass Jira key for exact matching
+                );
+            }
 
             if (removedSlackTasksForIssue.length > 0) {
               const titles = removedSlackTasksForIssue

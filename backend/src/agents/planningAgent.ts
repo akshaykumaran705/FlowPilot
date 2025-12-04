@@ -175,7 +175,10 @@ Guidelines:
 - Avoid overlapping blocks.
 - Tasks may include a "dueDate" (YYYY-MM-DD). Treat tasks with earlier due dates as higher priority, and try to allocate enough deep work time on or before their due date.
 - Tasks whose labels include "slack" represent work requested via Slack and should usually be scheduled in their own dedicated blocks (for example, labeled "Slack: ..."), not mixed into the same blocks as Jira or GitHub issue work.
-- Some tasks (both Jira and Slack-derived) may have labels like "JIRA_KEY:ABC-123". When a Slack task and a Jira task share the same "JIRA_KEY:..." label, you may group them into the same block because they refer to the same underlying issue. Otherwise, keep Slack tasks separate from Jira tasks.
+- When deciding whether a Slack-derived task and a Jira task are part of the same underlying work, compare their titles and textual context:
+  - If the Jira issue title and the Slack task title/description clearly describe the same thing (similar key phrases, same feature/bug name, etc.), you may group them into the same block.
+  - Do NOT rely on ids or labels (like "JIRA_KEY:ABC-123") to determine this; use the natural language content instead.
+- Otherwise, keep Slack tasks separate from Jira tasks.
 - Group related tasks into deep work blocks when possible.
 - Leave reasonable short breaks between long deep work blocks.
  - When using calendar events (MEETING/BLOCKED/INFO), use the event's title as the label and, when helpful, include a concise description in the block's "notes" field.
